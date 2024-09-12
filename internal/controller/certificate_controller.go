@@ -44,12 +44,24 @@ import (
 
 const (
 	defaultKeySize = 2048
+	finalizerKey   = "finalizers.k8c/certificate"
 )
 
 // CertificateReconciler reconciles a Certificate object
 type CertificateReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+}
+
+// objMetaToStr gets object key of the given object in string format.
+func objMetaToStr(obj client.Object) string {
+	return client.ObjectKeyFromObject(obj).String()
+}
+
+// referencedSecret returns '<namespace>/<name>' notation of the
+// Kubernetes Secret referred by Certificate CR.
+func referencedSecret(c *certsv1.Certificate) string {
+	return fmt.Sprintf("%s/%s", c.Namespace, c.Spec.SecretRef.Name)
 }
 
 // +kubebuilder:rbac:groups=certs.k8c.io,resources=certificates,verbs=get;list;watch;create;update;patch;delete
@@ -60,51 +72,37 @@ type CertificateReconciler struct {
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
 func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	l := log.FromContext(ctx).WithValues("Certificate", req.NamespacedName)
+	l := log.FromContext(ctx)
+	l.Info("Reconciling certificate")
 
 	var desired certsv1.Certificate
 	if err := r.Get(ctx, req.NamespacedName, &desired); err != nil {
 		if errors.IsNotFound(err) {
-			// Request object not found, could have been deleted after reconcile request.
-			// Return and don't requeue
-			l.Info("Certificate resource not found. Ignoring since object must be deleted")
 			return ctrl.Result{}, nil
 		}
 
-		// Error reading the object - requeue the request.
 		l.Error(err, "Failed to get Certificate")
 		return ctrl.Result{}, err
 	}
 
-	// TODO: finalizer
+	if !desired.ObjectMeta.DeletionTimestamp.IsZero() {
+		l.Info("Certificate being deleted")
+		return r.reconcileDelete(ctx, &desired)
+	}
 
-	// Check if we need to create or update the secret
+	if finalizerAdded := controllerutil.AddFinalizer(&desired, finalizerKey); finalizerAdded {
+		return ctrl.Result{}, r.Update(ctx, &desired)
+	}
+
 	secret := &corev1.Secret{}
 
-	err := r.Get(ctx, types.NamespacedName{Name: desired.Spec.SecretRef.Name, Namespace: desired.Namespace}, secret)
-	if errors.IsNotFound(err) {
-		l.Info("Creating a new Secret", "Secret.Namespace", desired.Namespace, "Secret.Name", desired.Spec.SecretRef.Name)
-		secret, err = r.createSecret(ctx, l, &desired)
-		if err != nil {
-			l.Error(err, "Failed to create new Secret", "Secret.Namespace", desired.Namespace, "Secret.Name", desired.Spec.SecretRef.Name)
-			return ctrl.Result{}, err
-		}
-	} else if err != nil {
-		l.Error(err, "Failed to get Secret")
-		return ctrl.Result{}, err
+	updated, err := r.reconcileSecret(ctx, l, &desired, secret)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile secret: %w", err)
+	} else if updated {
+		return ctrl.Result{}, r.Update(ctx, &desired)
 	}
 
-	// Secret exists, check if it needs to be updated
-	if r.shouldUpdateSecret(&desired, secret) {
-		l.Info("Updating existing Secret", "Secret.Namespace", desired.Namespace, "Secret.Name", desired.Spec.SecretRef.Name)
-
-		if err = r.renewCertificate(ctx, &desired, secret); err != nil {
-			l.Error(err, "Failed to update Secret", "Secret.Namespace", desired.Namespace, "Secret.Name", desired.Spec.SecretRef.Name)
-			return ctrl.Result{}, err
-		}
-	}
-
-	// Update the certificate status
 	if err = r.updateCertificateStatus(ctx, &desired, secret); err != nil {
 		l.Error(err, "Failed to update Certificate status")
 		return ctrl.Result{}, err
@@ -112,6 +110,45 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	l.Info("Successfully reconciled")
 	return ctrl.Result{RequeueAfter: r.calculateNextReconcile(&desired)}, nil
+}
+
+func (r *CertificateReconciler) reconcileSecret(ctx context.Context, l logr.Logger, cert *certsv1.Certificate, secret *corev1.Secret) (bool, error) {
+	err := r.Get(ctx, types.NamespacedName{Name: cert.Spec.SecretRef.Name, Namespace: cert.Namespace}, secret)
+	if errors.IsNotFound(err) {
+		l.Info("Creating a new Secret", "Secret", referencedSecret(cert))
+
+		secret, err = r.createSecret(ctx, l, cert)
+		if err != nil {
+			l.Error(err, "Failed to create new Secret", "Secret", referencedSecret(cert))
+			return false, err
+		}
+
+		return true, nil
+	} else if err != nil {
+		l.Error(err, "Failed to get Secret")
+		return false, err
+	}
+
+	if r.shouldUpdateSecret(cert, secret) {
+		l.Info("Updating existing Secret", "Secret", objMetaToStr(secret))
+
+		if err = r.renewCertificate(ctx, cert, secret); err != nil {
+			l.Error(err, "Failed to update Secret", "Secret", objMetaToStr(secret))
+			return false, err
+		}
+
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func (r *CertificateReconciler) reconcileDelete(ctx context.Context, c *certsv1.Certificate) (ctrl.Result, error) {
+	if finalizerDeleted := controllerutil.RemoveFinalizer(c, finalizerKey); finalizerDeleted {
+		return ctrl.Result{}, r.Update(ctx, c)
+	}
+
+	return ctrl.Result{}, nil
 }
 
 func (r *CertificateReconciler) calculateNextReconcile(cert *certsv1.Certificate) time.Duration {

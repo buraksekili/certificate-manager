@@ -20,18 +20,31 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
+	"k8s.io/apimachinery/pkg/api/errors"
 	"time"
 
+	certsv1 "github.com/buraksekili/certificate-operator/api/v1"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	certsv1 "github.com/buraksekili/certificate-operator/api/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
+
+const (
+	timeout  = time.Second * 10
+	interval = time.Millisecond * 250
+)
+
+func deleteAndWait(ctx context.Context, obj client.Object, key types.NamespacedName) {
+	err := k8sClient.Delete(ctx, obj)
+	ExpectWithOffset(1, err).To(SatisfyAny(BeNil(), Satisfy(errors.IsNotFound)))
+
+	Eventually(func() error {
+		return k8sClient.Get(ctx, key, obj)
+	}, timeout, interval).Should(Satisfy(errors.IsNotFound))
+}
 
 var _ = Describe("Certificate Controller", func() {
 	const (
@@ -42,25 +55,15 @@ var _ = Describe("Certificate Controller", func() {
 	)
 
 	ctx := context.Background()
-	var reconciler *CertificateReconciler
-
-	BeforeEach(func() {
-		reconciler = &CertificateReconciler{
-			Client: k8sClient,
-			Scheme: k8sClient.Scheme(),
-		}
-	})
 
 	AfterEach(func() {
-		err := k8sClient.Delete(ctx, &certsv1.Certificate{
-			ObjectMeta: metav1.ObjectMeta{Name: CertificateName, Namespace: CertificateNamespace},
-		})
-		Expect(err).To(SatisfyAny(BeNil(), Satisfy(errors.IsNotFound)))
+		ctx := context.Background()
 
-		err = k8sClient.Delete(ctx, &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: SecretName, Namespace: CertificateNamespace},
-		})
-		Expect(err).To(SatisfyAny(BeNil(), Satisfy(errors.IsNotFound)))
+		deleteAndWait(ctx, &certsv1.Certificate{ObjectMeta: metav1.ObjectMeta{Name: CertificateName, Namespace: CertificateNamespace}},
+			types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace})
+
+		deleteAndWait(ctx, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: SecretName, Namespace: CertificateNamespace}},
+			types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace})
 	})
 
 	It("should create a new Secret when a Certificate is created", func() {
@@ -75,11 +78,15 @@ var _ = Describe("Certificate Controller", func() {
 
 		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
+		createdCert := &certsv1.Certificate{}
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, createdCert)
+		}, timeout, interval).Should(Succeed())
 
-		secret := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, secret)).To(Succeed())
+		var secret corev1.Secret
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &secret)
+		}, timeout, interval).Should(Succeed())
 
 		Expect(secret.Data).To(HaveKey(corev1.TLSCertKey))
 		Expect(secret.Data).To(HaveKey(corev1.TLSPrivateKeyKey))
@@ -102,31 +109,35 @@ var _ = Describe("Certificate Controller", func() {
 				SecretRef: certsv1.SecretReference{Name: SecretName},
 			},
 		}
-
 		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
-
-		newCertToUpdate := certsv1.Certificate{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, &newCertToUpdate)).To(Succeed())
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &corev1.Secret{})
+		}, timeout, interval).Should(Succeed())
 
 		updatedDNSName := "newexample.com"
-		newCertToUpdate.Spec.DNSName = updatedDNSName
-		Expect(k8sClient.Update(ctx, &newCertToUpdate)).To(Succeed())
+		Eventually(func() error {
+			var certToUpdate certsv1.Certificate
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, &certToUpdate); err != nil {
+				return err
+			}
+			certToUpdate.Spec.DNSName = updatedDNSName
+			return k8sClient.Update(ctx, &certToUpdate)
+		}, timeout, interval).Should(Succeed())
 
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
-
-		secret := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, secret)).To(Succeed())
-
-		block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
-		Expect(block).NotTo(BeNil())
-
-		x509Cert, err := x509.ParseCertificate(block.Bytes)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(x509Cert.Subject.CommonName).To(Equal(updatedDNSName))
+		var secret corev1.Secret
+		Eventually(func() string {
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &secret)).To(Succeed())
+			block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
+			if block == nil {
+				return ""
+			}
+			x509Cert, err := x509.ParseCertificate(block.Bytes)
+			if err != nil {
+				return ""
+			}
+			return x509Cert.Subject.CommonName
+		}, timeout, interval).Should(Equal(updatedDNSName))
 	})
 
 	It("should renew the certificate when approaching expiration", func() {
@@ -142,24 +153,25 @@ var _ = Describe("Certificate Controller", func() {
 
 		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
+		var initialSecret corev1.Secret
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &initialSecret)
+		}, timeout, interval).Should(Succeed())
+
+		initialCert := parseCertFromSecret(&initialSecret)
+		initialExpiryTime := initialCert.NotAfter
 
 		// Wait for the certificate to approach expiration
 		time.Sleep(shortValidity * 2 / 3)
 
-		_, err = reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() time.Time {
+			var renewedSecret corev1.Secret
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &renewedSecret)
+			Expect(err).NotTo(HaveOccurred())
 
-		secret := &corev1.Secret{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, secret)).To(Succeed())
-
-		block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
-		Expect(block).NotTo(BeNil())
-
-		x509Cert, err := x509.ParseCertificate(block.Bytes)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(x509Cert.NotAfter).To(BeTemporally(">", time.Now().Add(shortValidity/2)))
+			renewedCert := parseCertFromSecret(&renewedSecret)
+			return renewedCert.NotAfter
+		}, timeout, interval).Should(BeTemporally(">", initialExpiryTime))
 	})
 
 	It("should update the Certificate status correctly", func() {
@@ -174,19 +186,47 @@ var _ = Describe("Certificate Controller", func() {
 
 		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
 
-		_, err := reconciler.Reconcile(ctx, reconcile.Request{NamespacedName: types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}})
-		Expect(err).NotTo(HaveOccurred())
+		Eventually(func() bool {
+			var updatedCert certsv1.Certificate
+			err := k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, &updatedCert)
+			if err != nil {
+				return false
+			}
 
-		updatedCert := &certsv1.Certificate{}
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, updatedCert)).To(Succeed())
+			status := updatedCert.Status
 
-		Expect(updatedCert.Status.NotBefore).NotTo(BeNil())
-		Expect(updatedCert.Status.NotAfter).NotTo(BeNil())
-		Expect(updatedCert.Status.SerialNumber).NotTo(BeEmpty())
-		Expect(updatedCert.Status.Issuer).NotTo(BeEmpty())
-		Expect(updatedCert.Status.LastRenewalTime).NotTo(BeNil())
-		Expect(updatedCert.Status.Conditions).To(HaveLen(1))
-		Expect(updatedCert.Status.Conditions[0].Type).To(Equal("Ready"))
-		Expect(updatedCert.Status.Conditions[0].Status).To(Equal(metav1.ConditionTrue))
+			if status.SerialNumber == "" || status.Issuer == "" {
+				return false
+			}
+
+			if len(status.Conditions) != 1 {
+				return false
+			}
+
+			condition := status.Conditions[0]
+			return condition.Type == "Ready" && condition.Status == metav1.ConditionTrue
+		}, timeout, interval).Should(BeTrue())
+
+		var finalCert certsv1.Certificate
+		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: CertificateName, Namespace: CertificateNamespace}, &finalCert)).To(Succeed())
+
+		Expect(finalCert.Status.NotBefore).NotTo(BeNil())
+		Expect(finalCert.Status.NotAfter).NotTo(BeNil())
+		Expect(finalCert.Status.SerialNumber).NotTo(BeEmpty())
+		Expect(finalCert.Status.Issuer).NotTo(BeEmpty())
+		Expect(finalCert.Status.LastRenewalTime).NotTo(BeNil())
+		Expect(finalCert.Status.Conditions).To(HaveLen(1))
+		Expect(finalCert.Status.Conditions[0].Type).To(Equal("Ready"))
+		Expect(finalCert.Status.Conditions[0].Status).To(Equal(metav1.ConditionTrue))
 	})
 })
+
+func parseCertFromSecret(secret *corev1.Secret) *x509.Certificate {
+	block, _ := pem.Decode(secret.Data[corev1.TLSCertKey])
+	Expect(block).NotTo(BeNil())
+
+	cert, err := x509.ParseCertificate(block.Bytes)
+	Expect(err).NotTo(HaveOccurred())
+
+	return cert
+}
