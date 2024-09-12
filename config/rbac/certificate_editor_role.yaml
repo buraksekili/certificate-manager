@@ -1,0 +1,27 @@
+# permissions for end users to edit certificates.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: kubermatic-certmanager
+    app.kubernetes.io/managed-by: kustomize
+  name: certificate-editor-role
+rules:
+- apiGroups:
+  - certs.k8c.io
+  resources:
+  - certificates
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - certs.k8c.io
+  resources:
+  - certificates/status
+  verbs:
+  - get

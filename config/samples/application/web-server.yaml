@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sample-app
+  labels:
+    app: sample-app
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: sample-app
+  template:
+    metadata:
+      labels:
+        app: sample-app
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.21
+          ports:
+            - containerPort: 80
+          volumeMounts:
+            - name: tls
+              mountPath: "/etc/nginx/tls"
+              readOnly: true
+      volumes:
+        - name: tls
+          secret:
+            secretName: sample-app-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sample-app
+spec:
+  selector:
+    app: sample-app
+  ports:
+    - protocol: TCP
+      port: 443
+      targetPort: 80
+---
+apiVersion: certs.k8c.io/v1
+kind: Certificate
+metadata:
+  name: sample-app-cert
+spec:
+  dnsName: sample-app.example.com
+  validity: 2160h
+  secretRef:
+    name: sample-app-tls
