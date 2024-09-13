@@ -24,15 +24,16 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"math/big"
+	"time"
+
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"math/big"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	"time"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -131,7 +132,7 @@ func (r *CertificateReconciler) reconcileSecret(ctx context.Context, l logr.Logg
 	if errors.IsNotFound(err) {
 		l.Info("Creating a new Secret", "Secret", referencedSecret(cert))
 
-		secret, err = r.createSecret(ctx, l, cert)
+		secret, err = r.createSecret(ctx, l, cert) //nolint
 		if err != nil {
 			l.Error(err, "Failed to create new Secret", "Secret", referencedSecret(cert))
 			return false, err
@@ -356,7 +357,7 @@ func (r *CertificateReconciler) setCondition(
 	c *certsv1.Certificate,
 	status metav1.ConditionStatus,
 	conditionType, reason, message string,
-) bool {
+) {
 	condition := metav1.Condition{
 		Type:               conditionType,
 		Status:             status,
@@ -369,5 +370,5 @@ func (r *CertificateReconciler) setCondition(
 		c.Status.Conditions = []metav1.Condition{}
 	}
 
-	return meta.SetStatusCondition(&c.Status.Conditions, condition)
+	meta.SetStatusCondition(&c.Status.Conditions, condition)
 }

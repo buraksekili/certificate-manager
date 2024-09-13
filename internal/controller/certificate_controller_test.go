@@ -20,8 +20,9 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/pem"
-	"k8s.io/apimachinery/pkg/api/errors"
 	"time"
+
+	"k8s.io/apimachinery/pkg/api/errors"
 
 	certsv1 "github.com/buraksekili/certificate-operator/api/v1"
 	. "github.com/onsi/ginkgo/v2"
