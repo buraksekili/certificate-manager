@@ -1,4 +1,4 @@
 ## Append samples of your project ##
 resources:
-- certs_v1_certificate.yaml
+- cert.yaml
 # +kubebuilder:scaffold:manifestskustomizesamples
