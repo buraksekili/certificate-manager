@@ -53,19 +53,37 @@ Once the controller is running, you can create Certificate custom resources to r
 
 Here's an example:
 
-```yaml
-apiVersion: certs.k8c.io/v1
-kind: Certificate
-metadata:
-  name: sample-app-cert
-spec:
-  dnsName: sample-app.example.com
-  validity: 2160h
-  secretRef:
-    name: sample-app-tls
+```bash
+kubectl apply -f - <<EOF
+    apiVersion: certs.k8c.io/v1
+    kind: Certificate
+    metadata:
+      name: sample-app-cert
+    spec:
+      dnsName: sample-app.example.com
+      validity: 2160h
+      secretRef:
+        name: sample-app-tls
+EOF
 ```
 
 > Example manifest is available in [./config/samples/cert.yaml](./config/samples/cert.yaml) file.
 
 This will create a self-signed TLS certificate for `sample-app.example.com` valid for 90 days, 
 stored in a Secret named `sample-app-tls`.
+
+The status of custom resource can be used to track the reconciliation status.
+```bash
+kubectl describe certificates.certs.k8c.io sample-app-cert
+# or
+kubectl get certificates.certs.k8c.io sample-app-cert -o yaml
+```
+
+Operator logs are also available.
+
+```bash
+kubectl logs -n kubermatic-certmanager-system deployments/kubermatic-certmanager-controller-manager -f
+```
+
+### Shortname for CRD
+Shortname for `certificates.certs.k8c.io` is defined as `c` if you do not want to type full name.
