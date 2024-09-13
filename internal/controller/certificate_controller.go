@@ -45,6 +45,13 @@ import (
 const (
 	defaultKeySize = 2048
 	finalizerKey   = "finalizers.k8c/certificate"
+
+	TypeReady               = "Ready"
+	TypeCertificateIssued   = "CertificateIssued"
+	TypeReconciliationError = "ReconciliationError"
+
+	ReasonSuccess              = "Success"
+	ReasonReconciliationFailed = "ReconciliationFailed"
 )
 
 // CertificateReconciler reconciles a Certificate object
@@ -98,7 +105,14 @@ func (r *CertificateReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 
 	updated, err := r.reconcileSecret(ctx, l, &desired, secret)
 	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to reconcile secret: %w", err)
+		errMsg := fmt.Sprintf("Failed to reconcile secret: %v", err)
+
+		r.setCondition(&desired, metav1.ConditionTrue, TypeReconciliationError, ReasonReconciliationFailed, errMsg)
+		if updateErr := r.Status().Update(ctx, &desired); updateErr != nil {
+			l.Error(updateErr, "Failed to update status")
+		}
+
+		return ctrl.Result{}, fmt.Errorf(errMsg)
 	} else if updated {
 		return ctrl.Result{}, r.Update(ctx, &desired)
 	}
@@ -324,21 +338,8 @@ func (r *CertificateReconciler) updateCertificateStatus(ctx context.Context, cer
 	cert.Status.Issuer = x509Cert.Issuer.CommonName
 	cert.Status.LastRenewalTime = metav1.NewTime(time.Now())
 
-	// Update the Ready condition
-	readyCondition := metav1.Condition{
-		Type:               "Ready",
-		Status:             metav1.ConditionTrue,
-		Reason:             "CertificateIssued",
-		Message:            "Certificate has been issued successfully",
-		LastTransitionTime: metav1.NewTime(time.Now()),
-	}
-
-	// Update the Conditions array
-	if len(cert.Status.Conditions) == 0 {
-		cert.Status.Conditions = []metav1.Condition{readyCondition}
-	} else {
-		meta.SetStatusCondition(&cert.Status.Conditions, readyCondition)
-	}
+	r.setCondition(cert, metav1.ConditionTrue, TypeCertificateIssued, ReasonSuccess, "Certificate has been issued successfully")
+	r.setCondition(cert, metav1.ConditionTrue, TypeReady, ReasonSuccess, "Certificate is ready for use")
 
 	return r.Status().Update(ctx, cert)
 }
@@ -349,4 +350,24 @@ func (r *CertificateReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		For(&certsv1.Certificate{}).
 		Owns(&corev1.Secret{}).
 		Complete(r)
+}
+
+func (r *CertificateReconciler) setCondition(
+	c *certsv1.Certificate,
+	status metav1.ConditionStatus,
+	conditionType, reason, message string,
+) bool {
+	condition := metav1.Condition{
+		Type:               conditionType,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		LastTransitionTime: metav1.NewTime(time.Now()),
+	}
+
+	if len(c.Status.Conditions) == 0 {
+		c.Status.Conditions = []metav1.Condition{}
+	}
+
+	return meta.SetStatusCondition(&c.Status.Conditions, condition)
 }

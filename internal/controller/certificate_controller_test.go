@@ -141,7 +141,7 @@ var _ = Describe("Certificate Controller", func() {
 	})
 
 	It("should renew the certificate when approaching expiration", func() {
-		shortValidity := 12 * time.Second
+		shortValidity := 6 * time.Second
 		cert := &certsv1.Certificate{
 			ObjectMeta: metav1.ObjectMeta{Name: CertificateName, Namespace: CertificateNamespace},
 			Spec: certsv1.CertificateSpec{
@@ -199,12 +199,13 @@ var _ = Describe("Certificate Controller", func() {
 				return false
 			}
 
-			if len(status.Conditions) != 1 {
+			if len(status.Conditions) != 2 {
 				return false
 			}
 
-			condition := status.Conditions[0]
-			return condition.Type == "Ready" && condition.Status == metav1.ConditionTrue
+			condition := status.Conditions[1]
+
+			return condition.Type == TypeReady && condition.Status == metav1.ConditionTrue
 		}, timeout, interval).Should(BeTrue())
 
 		var finalCert certsv1.Certificate
@@ -215,9 +216,40 @@ var _ = Describe("Certificate Controller", func() {
 		Expect(finalCert.Status.SerialNumber).NotTo(BeEmpty())
 		Expect(finalCert.Status.Issuer).NotTo(BeEmpty())
 		Expect(finalCert.Status.LastRenewalTime).NotTo(BeNil())
-		Expect(finalCert.Status.Conditions).To(HaveLen(1))
-		Expect(finalCert.Status.Conditions[0].Type).To(Equal("Ready"))
-		Expect(finalCert.Status.Conditions[0].Status).To(Equal(metav1.ConditionTrue))
+	})
+
+	It("should recreate the Secret if it's manually deleted", func() {
+		cert := &certsv1.Certificate{
+			ObjectMeta: metav1.ObjectMeta{Name: CertificateName, Namespace: CertificateNamespace},
+			Spec: certsv1.CertificateSpec{
+				DNSName:   DNSName,
+				Validity:  metav1.Duration{Duration: 24 * time.Hour},
+				SecretRef: certsv1.SecretReference{Name: SecretName},
+			},
+		}
+
+		Expect(k8sClient.Create(ctx, cert)).To(Succeed())
+
+		var secret corev1.Secret
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &secret)
+		}, timeout, interval).Should(Succeed())
+
+		// Manually delete the Secret
+		Expect(k8sClient.Delete(ctx, &secret)).To(Succeed())
+
+		// Check if the Secret is recreated
+		Eventually(func() error {
+			return k8sClient.Get(ctx, types.NamespacedName{Name: SecretName, Namespace: CertificateNamespace}, &secret)
+		}, timeout, interval).Should(Succeed())
+
+		// Verify the recreated Secret contains a valid certificate
+		x509Cert := parseCertFromSecret(&secret)
+		Expect(x509Cert.Subject.CommonName).To(Equal(DNSName))
+	})
+
+	It("should handle non-existent secret error", func() {
+
 	})
 })
 
