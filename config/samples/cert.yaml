@@ -1,0 +1,9 @@
+apiVersion: certs.k8c.io/v1
+kind: Certificate
+metadata:
+  name: sample-app-cert
+spec:
+  dnsName: sample-app.example.com
+  validity: 2160h
+  secretRef:
+    name: sample-app-tls

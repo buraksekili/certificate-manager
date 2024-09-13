@@ -1,9 +1,0 @@
-apiVersion: certs.k8c.io/v1
-kind: Certificate
-metadata:
-  labels:
-    app.kubernetes.io/name: kubermatic-certmanager
-    app.kubernetes.io/managed-by: kustomize
-  name: certificate-sample
-spec:
-  # TODO(user): Add fields here
